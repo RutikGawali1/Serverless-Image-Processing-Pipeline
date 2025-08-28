@@ -1,3 +1,10 @@
+# Create a ZIP archive of the Lambda function code using the archive_file data source
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/../src/image-processor"
+  output_path = "${path.module}/image-processor.zip"
+}
+
 # S3 Source Bucket with Free Tier optimization
 resource "aws_s3_bucket" "source_bucket" {
   bucket = "${var.project_name}-source-${random_id.bucket_suffix.hex}"
@@ -10,7 +17,7 @@ resource "aws_s3_bucket" "source_bucket" {
   }
 }
 
-# Enable versioning for safety (minimal cost impact)
+# Enable versioning for safety
 resource "aws_s3_bucket_versioning" "source_bucket" {
   bucket = aws_s3_bucket.source_bucket.id
   versioning_configuration {
@@ -39,7 +46,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "destination_bucket" {
     status = "Enabled"
 
     expiration {
-      days = 7  # Delete after 7 days to stay within free tier
+      days = 7
     }
 
     filter {
@@ -76,7 +83,7 @@ resource "aws_iam_role" "lambda_exec" {
   }
 }
 
-# Minimal IAM Policy for Lambda (principle of least privilege)
+# IAM Policy for Lambda
 resource "aws_iam_role_policy" "lambda_policy" {
   name = "${var.project_name}-lambda-policy"
   role = aws_iam_role.lambda_exec.id
@@ -111,7 +118,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:*:*:*"
+        Resource = "*"
       }
     ]
   })
@@ -119,21 +126,21 @@ resource "aws_iam_role_policy" "lambda_policy" {
 
 # Lambda Function with Free Tier optimized configuration
 resource "aws_lambda_function" "image_processor" {
-  filename      = "../src/image-processor/image-processor.zip"
-  function_name = "${var.project_name}-processor"
-  role          = aws_iam_role.lambda_exec.arn
-  handler       = "app.lambda_handler"
-  runtime       = "python3.9"
+  filename         = data.archive_file.lambda_zip.output_path
+  function_name    = "${var.project_name}-processor"
+  role             = aws_iam_role.lambda_exec.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.9"
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   
-  # Free Tier optimized settings
-  timeout = 28      # Max 30s but set lower to avoid long-running functions
-  memory_size = 128 # Minimum memory to reduce cost
+  timeout     = 28
+  memory_size = 128
   
   environment {
     variables = {
-      DESTINATION_BUCKET   = aws_s3_bucket.destination_bucket.bucket
-      SNS_TOPIC_ARN        = aws_sns_topic.notifications.arn
-      SEND_NOTIFICATIONS   = "false" # Disable notifications by default to save costs
+      DESTINATION_BUCKET = aws_s3_bucket.destination_bucket.bucket
+      SNS_TOPIC_ARN      = aws_sns_topic.notifications.arn
+      SEND_NOTIFICATIONS = "false"
     }
   }
 
@@ -141,6 +148,8 @@ resource "aws_lambda_function" "image_processor" {
     Owner   = var.owner_tag
     Project = var.project_name
   }
+
+  depends_on = [data.archive_file.lambda_zip]
 }
 
 # Lambda Permission for S3
@@ -159,13 +168,13 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
   lambda_function {
     lambda_function_arn = aws_lambda_function.image_processor.arn
     events              = ["s3:ObjectCreated:*"]
-    filter_suffix       = ".jpg"  # Only process JPG to minimize invocations
+    filter_suffix       = ".jpg"
   }
 
   depends_on = [aws_lambda_permission.allow_bucket]
 }
 
-# SNS Topic for notifications (optional)
+# SNS Topic for notifications
 resource "aws_sns_topic" "notifications" {
   name = "${var.project_name}-notifications"
   
@@ -175,16 +184,6 @@ resource "aws_sns_topic" "notifications" {
   }
 }
 
-# CloudWatch Log Group for Lambda with retention policy
-resource "aws_cloudwatch_log_group" "lambda_logs" {
-  name              = "/aws/lambda/${aws_lambda_function.image_processor.function_name}"
-  retention_in_days = 3  # Short retention to stay within free tier
-  
-  tags = {
-    Owner   = var.owner_tag
-    Project = var.project_name
-  }
-}
 
 # Outputs
 output "source_bucket_name" {
@@ -210,9 +209,8 @@ Next steps:
 3. Monitor Lambda function: https://console.aws.amazon.com/lambda/home?region=us-east-1#/functions/${aws_lambda_function.image_processor.function_name}
 
 To avoid charges:
-- This pipeline is optimized for Free Tier usage
 - Processed images are automatically deleted after 7 days
-- Notifications are disabled by default (enable by setting SEND_NOTIFICATIONS = "true" in Lambda environment)
+- Notifications are disabled by default
 - Remember to run 'terraform destroy' when done testing
 
 EOT
